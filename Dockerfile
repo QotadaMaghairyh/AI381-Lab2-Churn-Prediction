@@ -11,11 +11,16 @@ COPY requirements.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
+
 # Stage 2: Runtime
 FROM python:3.14.4-slim AS runtime
 
-WORKDIR /app
+# Update OS packages to include security fixes
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 # Use the virtual environment
 ENV PATH="/opt/venv/bin:$PATH"
 
