@@ -1,5 +1,5 @@
 # Stage 1: Build dependencies
-FROM python:3.14.4-slim AS builder
+FROM python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727 AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
 # Stage 2: Runtime
-FROM python:3.14.4-slim AS runtime
+FROM python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727 AS runtime
 
 # Update OS packages to include security fixes
 RUN apt-get update && \
