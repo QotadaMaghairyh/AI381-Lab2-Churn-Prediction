@@ -19,7 +19,7 @@ A machine learning API that predicts the probability of customer churn using a t
 Start the API with one command:
 
 ```bash
-docker run --rm --name ai381-churn-api -p 8000:8000 ghcr.io/qotadamaghairyh/ai381-lab2-churn-prediction:cc668be8e6eca9cec40b0aff38b9f9370d8f83aa
+docker run --rm --name ai381-churn-api -p 8000:8000 ghcr.io/qotadamaghairyh/ai381-lab2-churn-prediction:e39941fc8f9160474b0f8c54be82a469cf6aea45
 ```
 
 The API will be available at:
