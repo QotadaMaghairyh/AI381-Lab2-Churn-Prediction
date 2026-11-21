@@ -1,0 +1,11 @@
+# Lab 3 local deployment, based on the official Starter. No build or model mounts.
+# Start only after approval:
+#   docker compose -f docker-compose.deploy.yml up -d --no-build --no-recreate --wait --wait-timeout 120
+# Then: bash scripts/smoke_test.sh
+name: ai381-lab3-deploy
+services:
+  api:
+    image: ghcr.io/qotadamaghairyh/ai381-lab2-churn-prediction:d00ba9d154b4efb22409891e42cb178ff1930358@sha256:07e9ebbdc028f006fb4f363b7bca1f5979d4fde93e757fcd68802f809b1dfd3c
+    ports:
+      - "127.0.0.1:8001:8000"
+    restart: unless-stopped
