@@ -1,0 +1,11 @@
+{
+  "model_version": "local",
+  "mlflow_run_id": "af7b547d66884cd8b23ea7b21667e638",
+  "mlflow_model_version": 1,
+  "model": "logreg",
+  "data_sha256": "76a6447e764b80e9b6b80aba1f294d96fab68f79e608c78e2a7af09ae6ea91fa",
+  "auc": 0.798,
+  "f1": 0.495,
+  "p95_latency_ms": 6.58,
+  "trained_at": "2026-11-21T07:31:58+00:00"
+}

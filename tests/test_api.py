@@ -1,6 +1,9 @@
 
+import numpy as np
 from fastapi.testclient import TestClient
 
+import src.app.main as app_module
+from src import schema
 from src.app.main import app
 
 client = TestClient(app)
@@ -81,7 +84,37 @@ def test_predict_is_deterministic():
 
 
 def test_model_loads():
-    from src.app.main import model
+    from src.app.main import MODEL_PATH, PROJECT_ROOT, model
 
     assert model is not None
     assert hasattr(model, "predict_proba")
+    assert MODEL_PATH == PROJECT_ROOT / "artifacts" / "model.joblib"
+    assert list(model.feature_names_in_) == schema.FEATURES
+
+
+def test_predict_maps_monthly_fee_to_champion_schema(monkeypatch):
+    class RecordingModel:
+        def predict_proba(self, frame):
+            assert list(frame.columns) == schema.FEATURES
+            assert "monthly_fee" not in frame.columns
+            assert frame.loc[0, "monthly_charges"] == 75.0
+            assert frame.loc[0, "tenure_months"] == 12
+            assert frame.loc[0, "support_calls"] == 2
+            assert frame.loc[0, "contract"] == "Month-to-month"
+            assert frame.loc[0, "internet_service"] == "Fiber optic"
+            return np.array([[0.25, 0.75]])
+
+    monkeypatch.setattr(app_module, "model", RecordingModel())
+    response = client.post(
+        "/predict",
+        json={
+            "tenure_months": 12,
+            "monthly_fee": 75.0,
+            "support_calls": 2,
+            "contract": "Month-to-month",
+            "internet_service": "Fiber optic",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"churn_probability": 0.75}

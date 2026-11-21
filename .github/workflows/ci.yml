@@ -22,7 +22,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -35,8 +35,211 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -v
-  build-and-push:
+
+  train-and-gate:
     needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      MLFLOW_TRACKING_URI: http://localhost:5000
+      GIT_SHA: ${{ github.sha }}
+      BATCH: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_PROJECT_NAME: ai381-ci-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout repository and champion history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Prepare isolated MLflow configuration and evidence
+        id: prepare
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mlflow-evidence"
+          # Replace the published port; merging a normal list would retain 0.0.0.0.
+          # !override requires Docker Compose 2.24.4 or newer.
+          cat > "$RUNNER_TEMP/mlflow-ci.override.yml" <<'YAML'
+          services:
+            mlflow:
+              ports: !override
+                - "127.0.0.1:5000:5000"
+          YAML
+          echo "COMPOSE_FILE=docker-compose.mlflow.yml:$RUNNER_TEMP/mlflow-ci.override.yml" >> "$GITHUB_ENV"
+          printf 'Batch: %s\nCommit: %s\n' "$BATCH" "$GIT_SHA" > "$RUNNER_TEMP/mlflow-evidence/context.txt"
+          docker compose version
+
+      - name: Set up training Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Install training dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Determine champion reference or initial bootstrap
+        id: champion
+        env:
+          CHAMPION_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CHAMPION_REF" =~ ^[0-9a-fA-F]{40}$ || "$CHAMPION_REF" =~ ^0+$ ]]; then
+            echo "BLOCKED: a valid base/previous commit is required for the champion reference."
+            exit 1
+          fi
+          # Missing/unreadable history must never be mistaken for a missing file.
+          git cat-file -e "${CHAMPION_REF}^{commit}"
+          if [[ "$(git rev-parse --is-shallow-repository)" != "false" ]]; then
+            echo "BLOCKED: complete Git history is required to determine initial bootstrap."
+            exit 1
+          fi
+          printf 'Champion reference: %s\n' "$CHAMPION_REF" >> "$RUNNER_TEMP/mlflow-evidence/context.txt"
+          # These assignments must succeed before an empty result can mean absence.
+          champion_entry="$(git ls-tree "$CHAMPION_REF" -- artifacts/champion.json)"
+          if [[ -n "$champion_entry" ]]; then
+            git show "${CHAMPION_REF}:artifacts/champion.json" \
+              | tee "$RUNNER_TEMP/mlflow-evidence/champion-reference.json"
+            python -m json.tool "$RUNNER_TEMP/mlflow-evidence/champion-reference.json" > /dev/null
+            echo "mode=compare" >> "$GITHUB_OUTPUT"
+            echo "Champion mode: compare" >> "$RUNNER_TEMP/mlflow-evidence/context.txt"
+          else
+            previous_champion="$(git log -1 --format=%H "$CHAMPION_REF" -- artifacts/champion.json)"
+            if [[ -n "$previous_champion" ]]; then
+              echo "BLOCKED: champion.json is missing but existed in the reference history."
+              exit 1
+            fi
+            echo "Initial Lab 3 bootstrap: no champion.json exists in the reference or its history."
+            echo "mode=bootstrap" >> "$GITHUB_OUTPUT"
+            echo "Champion mode: initial bootstrap" >> "$RUNNER_TEMP/mlflow-evidence/context.txt"
+          fi
+
+      - name: Start MLflow and verify health
+        id: mlflow
+        run: |
+          set -euo pipefail
+          docker compose config > "$RUNNER_TEMP/mlflow-evidence/compose.yml"
+          docker compose up -d --wait --wait-timeout 120
+          curl --fail --silent --show-error --max-time 10 http://localhost:5000/health \
+            | tee "$RUNNER_TEMP/mlflow-evidence/health.txt"
+
+      - name: Train three candidate models
+        id: train
+        run: |
+          set -euo pipefail
+          python -B -u -m src.train.train_mlflow 2>&1 \
+            | tee "$RUNNER_TEMP/mlflow-evidence/training.log"
+
+      - name: Promotion gate (BLOCKED fails the job)
+        id: gate
+        env:
+          CHAMPION_MODE: ${{ steps.champion.outputs.mode }}
+        run: |
+          set -euo pipefail
+          gate_args=(--batch "$BATCH")
+          case "$CHAMPION_MODE" in
+            compare)
+              gate_args+=(--champion-file "$RUNNER_TEMP/mlflow-evidence/champion-reference.json")
+              ;;
+            bootstrap)
+              # No explicit champion path: use the Starter's first-promotion behavior.
+              ;;
+            *)
+              echo "BLOCKED: champion-reference mode was not established."
+              exit 1
+              ;;
+          esac
+          # A fresh working directory prevents a checked-out PR champion from becoming
+          # the baseline during bootstrap. The gate exports into this directory.
+          mkdir "$RUNNER_TEMP/mlflow-promotion"
+          (
+            cd "$RUNNER_TEMP/mlflow-promotion"
+            python -B -u "$GITHUB_WORKSPACE/scripts/promote.py" "${gate_args[@]}"
+          ) 2>&1 | tee "$RUNNER_TEMP/mlflow-evidence/gate.log"
+
+      - name: Verify and collect exported champion files
+        run: |
+          for file in model.joblib metadata.json champion.json; do
+            test -s "$RUNNER_TEMP/mlflow-promotion/artifacts/$file"
+          done
+          mkdir -p artifacts
+          cp "$RUNNER_TEMP/mlflow-promotion/artifacts/"{model.joblib,metadata.json,champion.json} artifacts/
+
+      - name: Upload successful champion
+        if: success() && steps.gate.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: champion-${{ env.BATCH }}
+          path: |
+            artifacts/model.joblib
+            artifacts/metadata.json
+            artifacts/champion.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Export current batch tracking evidence
+        if: always() && steps.mlflow.outcome == 'success' && steps.train.outcome != 'skipped'
+        run: |
+          python -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import mlflow
+
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          batch = os.environ["BATCH"]
+          runs = mlflow.search_runs(
+              experiment_names=["churn"],
+              filter_string=f"tags.batch = '{batch}'",
+              output_format="list",
+          )
+          evidence = {
+              "batch": batch,
+              "git_sha": os.environ["GIT_SHA"],
+              "runs": [
+                  {"run_id": r.info.run_id, "status": r.info.status,
+                   "params": r.data.params, "metrics": r.data.metrics, "tags": r.data.tags}
+                  for r in runs
+              ],
+          }
+          path = Path(os.environ["RUNNER_TEMP"]) / "mlflow-evidence" / "runs.json"
+          path.write_text(json.dumps(evidence, indent=2))
+          PY
+
+      - name: Collect MLflow logs
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          docker compose ps --all > "$RUNNER_TEMP/mlflow-evidence/compose-ps.txt" 2>&1
+          docker compose logs --no-color > "$RUNNER_TEMP/mlflow-evidence/mlflow.log" 2>&1
+
+      - name: Record training and gate outcomes
+        if: always()
+        env:
+          TRAIN_OUTCOME: ${{ steps.train.outcome }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/mlflow-evidence"
+          printf 'Batch: %s\nCommit: %s\nTraining: %s\nGate: %s\n' \
+            "$BATCH" "$GIT_SHA" "$TRAIN_OUTCOME" "$GATE_OUTCOME" \
+            | tee "$RUNNER_TEMP/mlflow-evidence/outcomes.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload training and gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mlflow-evidence-${{ env.BATCH }}
+          path: ${{ runner.temp }}/mlflow-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary MLflow service and data
+        if: always() && steps.prepare.outcome == 'success'
+        run: docker compose down --volumes --remove-orphans --timeout 10
+
+  build-and-push:
+    needs: [test, train-and-gate]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
@@ -48,6 +251,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      - name: Download successful champion artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: champion-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+
+      # Dockerfile still packages the legacy root model.joblib until the next step.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 

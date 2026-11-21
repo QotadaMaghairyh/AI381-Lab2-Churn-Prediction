@@ -1,5 +1,5 @@
 # Stage 1: Build dependencies
-FROM python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727 AS builder
+FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
 # Stage 2: Runtime
-FROM python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727 AS runtime
+FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
 
 # Update OS packages to include security fixes
 RUN apt-get update && \
@@ -27,9 +27,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy installed dependencies from builder
 COPY --from=builder /opt/venv /opt/venv
 
-# Copy application files and trained model
+# Package the trusted champion exported by the promotion gate, with its provenance.
+# GitHub Actions downloads these files into artifacts/ before building.
 COPY src/ ./src/
-COPY model.joblib .
+COPY artifacts/model.joblib artifacts/metadata.json artifacts/champion.json ./artifacts/
+RUN sha256sum artifacts/model.joblib > artifacts/model.sha256
 
 # Create a non-root user
 RUN groupadd --system appgroup && \
